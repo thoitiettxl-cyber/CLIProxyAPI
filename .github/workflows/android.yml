@@ -2,15 +2,18 @@ name: Sync Upstream & Build Android Binaries (CGO=0 & CGO=1)
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Hàng ngày 00:00 UTC (~07:00 VN)
-  workflow_dispatch:     # Manual run từ tab Actions
+    - cron: '0 0 * * *'  # Hàng ngày sync & build test (chỉ artifacts)
+  workflow_dispatch:     # Manual: chỉ artifacts
   push:
     tags:
-      - 'v*-android*'    # Trigger release khi push tag kiểu v1.0.1-android
+      - 'v*-android*'    # Chỉ trigger release khi push tag kiểu vX.Y.Z-android*
 
 jobs:
   sync-and-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Cần để tạo release & upload assets
+
     steps:
       - name: Checkout Fork
         uses: actions/checkout@v4
@@ -36,7 +39,7 @@ jobs:
           go mod tidy
           go mod download
 
-      # Build CGO=0 (pure Go, nhẹ hơn nếu project không cần C bindings)
+      # Build CGO=0
       - name: Build Android arm64 - CGO=0
         run: |
           GOOS=android GOARCH=arm64 CGO_ENABLED=0 \
@@ -44,7 +47,7 @@ jobs:
             -o cli-proxy-api-no-cgo \
             ./cmd/server
 
-      # Setup NDK cho CGO=1 (dùng r27d LTS ổn định, API 35 cho Android mới)
+      # Setup NDK cho CGO=1
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -70,8 +73,9 @@ jobs:
           echo "CGO=0 size: $(du -h cli-proxy-api-no-cgo | cut -f1)"
           echo "CGO=1 size: $(du -h cli-proxy-api-cgo | cut -f1)"
 
-      # Upload Artifacts (luôn có cho manual/schedule)
-      - name: Upload Artifacts
+      # Upload Artifacts (cho manual/schedule)
+      - name: Upload Artifacts (Test Builds)
+        if: github.ref_type != 'tag'  # Chỉ khi không phải tag
         uses: actions/upload-artifact@v4
         with:
           name: android-binaries-${{ github.run_number }}
@@ -80,14 +84,14 @@ jobs:
             cli-proxy-api-cgo
           retention-days: 14
 
-      # Tạo Release nếu push tag (tên release = tag name, ví dụ v1.0.1-android)
-      - name: Create Release & Upload Binaries
-        if: startsWith(github.ref, 'refs/tags/')
+      # Tạo Release CHỈ KHI push tag (tên release = "CLI Proxy API <tag>")
+      - name: Create GitHub Release with Binaries
+        if: startsWith(github.ref, 'refs/tags/')  # Chỉ chạy khi tag push
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}  # Tên release chính là tag, ví dụ "v1.0.1-android"
-          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}                  # Tag name = v1.0.1-android
+          name: CLI Proxy API ${{ github.ref_name }}        # Release title: CLI Proxy API v1.0.1-android
+          generate_release_notes: true                      # Auto generate notes từ commits
           files: |
             cli-proxy-api-no-cgo
             cli-proxy-api-cgo
