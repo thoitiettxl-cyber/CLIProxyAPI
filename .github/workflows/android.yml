@@ -1,0 +1,93 @@
+name: Sync Upstream & Build Android Binaries (CGO=0 & CGO=1)
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Hàng ngày 00:00 UTC (~07:00 VN)
+  workflow_dispatch:     # Manual run từ tab Actions
+  push:
+    tags:
+      - 'v*-android*'    # Trigger release khi push tag kiểu v1.0.1-android
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync with Upstream
+        run: |
+          git remote add upstream https://github.com/router-for-me/cliproxyapi.git || true
+          git fetch upstream
+          git checkout main
+          git merge upstream/main --allow-unrelated-histories --no-edit || echo "Merge conflict? Resolve manually if needed."
+          git push origin main || echo "Push skipped if no changes"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go Mod Tidy & Download
+        run: |
+          go mod tidy
+          go mod download
+
+      # Build CGO=0 (pure Go, nhẹ hơn nếu project không cần C bindings)
+      - name: Build Android arm64 - CGO=0
+        run: |
+          GOOS=android GOARCH=arm64 CGO_ENABLED=0 \
+            go build -v -trimpath -ldflags="-s -w" \
+            -o cli-proxy-api-no-cgo \
+            ./cmd/server
+
+      # Setup NDK cho CGO=1 (dùng r27d LTS ổn định, API 35 cho Android mới)
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27d
+
+      - name: Build Android arm64 - CGO=1
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang
+          CXX: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang++
+        run: |
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
+            go build -v -trimpath -ldflags="-s -w" \
+            -o cli-proxy-api-cgo \
+            ./cmd/server
+
+      - name: Verify Binaries
+        run: |
+          file cli-proxy-api-no-cgo || true
+          file cli-proxy-api-cgo || true
+          ls -lh cli-proxy-api-*
+          echo "CGO=0 size: $(du -h cli-proxy-api-no-cgo | cut -f1)"
+          echo "CGO=1 size: $(du -h cli-proxy-api-cgo | cut -f1)"
+
+      # Upload Artifacts (luôn có cho manual/schedule)
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-binaries-${{ github.run_number }}
+          path: |
+            cli-proxy-api-no-cgo
+            cli-proxy-api-cgo
+          retention-days: 14
+
+      # Tạo Release nếu push tag (tên release = tag name, ví dụ v1.0.1-android)
+      - name: Create Release & Upload Binaries
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}  # Tên release chính là tag, ví dụ "v1.0.1-android"
+          generate_release_notes: true
+          files: |
+            cli-proxy-api-no-cgo
+            cli-proxy-api-cgo
