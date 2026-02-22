@@ -2,17 +2,17 @@ name: Sync Upstream & Build Android Binaries (CGO=0 & CGO=1)
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Hàng ngày sync & build test (chỉ artifacts)
-  workflow_dispatch:     # Manual: chỉ artifacts
+    - cron: '0 0 * * *' # Daily auto sync + build + nightly release
+  workflow_dispatch: # Manual run: build + nightly release
   push:
     tags:
-      - 'v*-android*'    # Chỉ trigger release khi push tag kiểu vX.Y.Z-android*
+      - 'v*-android*' # Stable Android release when pushing version tag
 
 jobs:
   sync-and-build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Cần để tạo release & upload assets
+      contents: write
 
     steps:
       - name: Checkout Fork
@@ -39,7 +39,6 @@ jobs:
           go mod tidy
           go mod download
 
-      # Build CGO=0
       - name: Build Android arm64 - CGO=0
         run: |
           GOOS=android GOARCH=arm64 CGO_ENABLED=0 \
@@ -47,7 +46,6 @@ jobs:
             -o cli-proxy-api-no-cgo \
             ./cmd/server
 
-      # Setup NDK cho CGO=1
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -65,33 +63,58 @@ jobs:
             -o cli-proxy-api-cgo \
             ./cmd/server
 
+      - name: Generate SHA256
+        run: |
+          sha256sum cli-proxy-api-no-cgo | awk '{print $1}' > cli-proxy-api-no-cgo.sha256
+          sha256sum cli-proxy-api-cgo | awk '{print $1}' > cli-proxy-api-cgo.sha256
+
       - name: Verify Binaries
         run: |
           file cli-proxy-api-no-cgo || true
           file cli-proxy-api-cgo || true
-          ls -lh cli-proxy-api-*
+          ls -lh cli-proxy-api-* *.sha256
           echo "CGO=0 size: $(du -h cli-proxy-api-no-cgo | cut -f1)"
           echo "CGO=1 size: $(du -h cli-proxy-api-cgo | cut -f1)"
 
-      # Upload Artifacts (cho manual/schedule)
-      - name: Upload Artifacts (Test Builds)
-        if: github.ref_type != 'tag'  # Chỉ khi không phải tag
+      - name: Upload Artifacts (for debug/history)
+        if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
           name: android-binaries-${{ github.run_number }}
           path: |
             cli-proxy-api-no-cgo
             cli-proxy-api-cgo
+            cli-proxy-api-no-cgo.sha256
+            cli-proxy-api-cgo.sha256
           retention-days: 14
 
-      # Tạo Release CHỈ KHI push tag (tên release = "CLI Proxy API <tag>")
-      - name: Create GitHub Release with Binaries
-        if: startsWith(github.ref, 'refs/tags/')  # Chỉ chạy khi tag push
+      - name: Create/Update Nightly Android Release
+        if: github.ref_type != 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}                  # Tag name = v1.0.1-android
-          name: CLI Proxy API ${{ github.ref_name }}        # Release title: CLI Proxy API v1.0.1-android
-          generate_release_notes: true                      # Auto generate notes từ commits
+          tag_name: nightly-android
+          name: CLI Proxy API nightly-android
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          body: |
+            Auto nightly Android build from workflow run #${{ github.run_number }}.
+            Source SHA: ${{ github.sha }}
           files: |
             cli-proxy-api-no-cgo
             cli-proxy-api-cgo
+            cli-proxy-api-no-cgo.sha256
+            cli-proxy-api-cgo.sha256
+
+      - name: Create GitHub Release with Binaries (Stable Tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: CLI Proxy API ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            cli-proxy-api-no-cgo
+            cli-proxy-api-cgo
+            cli-proxy-api-no-cgo.sha256
+            cli-proxy-api-cgo.sha256
