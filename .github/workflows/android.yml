@@ -1,32 +1,121 @@
-name: Sync Upstream & Build Android Binaries (CGO=0 & CGO=1)
+name: Build Android Binaries from Upstream Tag
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Daily auto sync + build + nightly release
-  workflow_dispatch: # Manual run: build + nightly release
+    - cron: '0 0 * * *' # Daily: detect latest upstream v* tag and build if missing in fork
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional upstream tag to build (example: v6.8.51)'
+        required: false
+        type: string
   push:
     tags:
-      - 'v*-android*' # Stable Android release when pushing version tag
+      - 'v*' # Build when a v* tag is pushed directly to fork
 
 jobs:
-  sync-and-build:
+  resolve-tag:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-
+      contents: read
+    outputs:
+      target_tag: ${{ steps.pick.outputs.target_tag }}
+      should_build: ${{ steps.pick.outputs.should_build }}
     steps:
       - name: Checkout Fork
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Sync with Upstream
+      - name: Configure Git identity
         run: |
-          git remote add upstream https://github.com/router-for-me/cliproxyapi.git || true
-          git fetch upstream
-          git checkout main
-          git merge upstream/main --allow-unrelated-histories --no-edit || echo "Merge conflict? Resolve manually if needed."
-          git push origin main || echo "Push skipped if no changes"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Pick target tag
+        id: pick
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git 2>/dev/null || true
+          git fetch --tags upstream
+          git fetch --tags origin
+
+          TARGET=""
+
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TARGET="$INPUT_TAG"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            TARGET="$REF_NAME"
+          else
+            TARGET="$(git tag -l 'v*' --sort=-version:refname | head -n1)"
+          fi
+
+          if [ -z "$TARGET" ]; then
+            echo "No target tag found." >&2
+            echo "target_tag=" >> "$GITHUB_OUTPUT"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/$TARGET" >/dev/null; then
+            echo "Tag not found locally after fetch: $TARGET" >&2
+            echo "target_tag=$TARGET" >> "$GITHUB_OUTPUT"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SHOULD_BUILD="true"
+
+          # For schedule/manual mode: skip when release tag already exists in fork.
+          if [ "$EVENT_NAME" != "push" ]; then
+            if git ls-remote --tags origin "refs/tags/$TARGET" | grep -q "$TARGET"; then
+              SHOULD_BUILD="false"
+            fi
+          fi
+
+          echo "target_tag=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved target tag: $TARGET"
+          echo "Should build: $SHOULD_BUILD"
+
+  build-and-release:
+    needs: resolve-tag
+    if: needs.resolve-tag.outputs.should_build == 'true' && needs.resolve-tag.outputs.target_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TARGET_TAG: ${{ needs.resolve-tag.outputs.target_tag }}
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch and checkout target tag
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git 2>/dev/null || true
+          git fetch --tags upstream
+          git fetch --tags origin
+
+          if git rev-parse -q --verify "refs/tags/$TARGET_TAG" >/dev/null; then
+            git checkout -f "refs/tags/$TARGET_TAG"
+          else
+            echo "Target tag not found: $TARGET_TAG" >&2
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -54,7 +143,6 @@ jobs:
 
       - name: Build Android arm64 - CGO=1
         env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang
           CXX: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang++
         run: |
@@ -68,19 +156,16 @@ jobs:
           sha256sum cli-proxy-api-no-cgo | awk '{print $1}' > cli-proxy-api-no-cgo.sha256
           sha256sum cli-proxy-api-cgo | awk '{print $1}' > cli-proxy-api-cgo.sha256
 
-      - name: Verify Binaries
+      - name: Verify binaries
         run: |
           file cli-proxy-api-no-cgo || true
           file cli-proxy-api-cgo || true
           ls -lh cli-proxy-api-* *.sha256
-          echo "CGO=0 size: $(du -h cli-proxy-api-no-cgo | cut -f1)"
-          echo "CGO=1 size: $(du -h cli-proxy-api-cgo | cut -f1)"
 
-      - name: Upload Artifacts (for debug/history)
-        if: github.ref_type != 'tag'
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-binaries-${{ github.run_number }}
+          name: android-binaries-${{ env.TARGET_TAG }}
           path: |
             cli-proxy-api-no-cgo
             cli-proxy-api-cgo
@@ -88,30 +173,11 @@ jobs:
             cli-proxy-api-cgo.sha256
           retention-days: 14
 
-      - name: Create/Update Nightly Android Release
-        if: github.ref_type != 'tag'
+      - name: Create GitHub release (tag)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: nightly-android
-          name: CLI Proxy API nightly-android
-          prerelease: true
-          make_latest: false
-          generate_release_notes: false
-          body: |
-            Auto nightly Android build from workflow run #${{ github.run_number }}.
-            Source SHA: ${{ github.sha }}
-          files: |
-            cli-proxy-api-no-cgo
-            cli-proxy-api-cgo
-            cli-proxy-api-no-cgo.sha256
-            cli-proxy-api-cgo.sha256
-
-      - name: Create GitHub Release with Binaries (Stable Tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: CLI Proxy API ${{ github.ref_name }}
+          tag_name: ${{ env.TARGET_TAG }}
+          name: CLI Proxy API ${{ env.TARGET_TAG }}
           generate_release_notes: true
           files: |
             cli-proxy-api-no-cgo
