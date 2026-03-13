@@ -42,8 +42,8 @@ jobs:
           set -euo pipefail
 
           git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git 2>/dev/null || true
-          git fetch --tags upstream
-          git fetch --tags origin
+          git fetch upstream '+refs/tags/*:refs/upstream-tags/*'
+          git fetch origin '+refs/tags/*:refs/tags/*'
 
           TARGET=""
 
@@ -52,7 +52,7 @@ jobs:
           elif [ "$EVENT_NAME" = "push" ]; then
             TARGET="$REF_NAME"
           else
-            TARGET="$(git tag -l 'v*' --sort=-version:refname | head -n1)"
+            TARGET="$(git for-each-ref refs/upstream-tags --format='%(refname:strip=2)' | grep '^v' | sort -V | tail -n1)"
           fi
 
           if [ -z "$TARGET" ]; then
@@ -62,8 +62,8 @@ jobs:
             exit 0
           fi
 
-          if ! git rev-parse -q --verify "refs/tags/$TARGET" >/dev/null; then
-            echo "Tag not found locally after fetch: $TARGET" >&2
+          if ! git rev-parse -q --verify "refs/upstream-tags/$TARGET" >/dev/null; then
+            echo "Tag not found in upstream namespace after fetch: $TARGET" >&2
             echo "target_tag=$TARGET" >> "$GITHUB_OUTPUT"
             echo "should_build=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -107,13 +107,13 @@ jobs:
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git 2>/dev/null || true
-          git fetch --tags upstream
-          git fetch --tags origin
+          git fetch upstream '+refs/tags/*:refs/upstream-tags/*'
+          git fetch origin '+refs/tags/*:refs/tags/*'
 
-          if git rev-parse -q --verify "refs/tags/$TARGET_TAG" >/dev/null; then
-            git checkout -f "refs/tags/$TARGET_TAG"
+          if git rev-parse -q --verify "refs/upstream-tags/$TARGET_TAG" >/dev/null; then
+            git checkout -f "$(git rev-parse "refs/upstream-tags/$TARGET_TAG^{commit}")"
           else
-            echo "Target tag not found: $TARGET_TAG" >&2
+            echo "Target tag not found in upstream namespace: $TARGET_TAG" >&2
             exit 1
           fi
 
