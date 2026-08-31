@@ -1,0 +1,57 @@
+name: build-pi-identity-login-plugin
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "examples/plugin/pi-identity-login/**"
+      - ".github/workflows/build-pi-identity-login-plugin.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  linux-arm64-glibc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install aarch64 glibc cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+
+      - name: Test plugin
+        run: go -C examples/plugin/pi-identity-login/go test -count=1 ./...
+
+      - name: Build linux/arm64 glibc plugin
+        run: |
+          mkdir -p examples/plugin/bin
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+            go -C examples/plugin/pi-identity-login/go build -buildmode=c-shared \
+            -o examples/plugin/bin/pi-identity-login.so .
+          rm -f examples/plugin/bin/pi-identity-login.h examples/plugin/pi-identity-login/go/pi-identity-login.h
+
+      - name: Verify glibc linkage
+        run: |
+          set -euo pipefail
+          aarch64-linux-gnu-readelf -d examples/plugin/bin/pi-identity-login.so | tee "$RUNNER_TEMP/plugin-dynamic.txt"
+          grep -F "Shared library: [libc.so.6]" "$RUNNER_TEMP/plugin-dynamic.txt"
+          if grep -F musl "$RUNNER_TEMP/plugin-dynamic.txt"; then
+            echo "plugin linked against musl" >&2
+            exit 1
+          fi
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-identity-login-linux-arm64
+          path: examples/plugin/bin/pi-identity-login.so
+          if-no-files-found: error
