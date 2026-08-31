@@ -33,11 +33,12 @@ jobs:
 
       - name: Build linux/arm64 glibc plugin
         run: |
-          mkdir -p examples/plugin/bin
+          mkdir -p "$GITHUB_WORKSPACE/examples/plugin/bin"
           CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
             go -C examples/plugin/pi-identity-login/go build -buildmode=c-shared \
-            -o examples/plugin/bin/pi-identity-login.so .
-          rm -f examples/plugin/bin/pi-identity-login.h examples/plugin/pi-identity-login/go/pi-identity-login.h
+            -o "$GITHUB_WORKSPACE/examples/plugin/bin/pi-identity-login.so" .
+          rm -f "$GITHUB_WORKSPACE/examples/plugin/bin/pi-identity-login.h"
+          rm -f examples/plugin/pi-identity-login/go/pi-identity-login.h
 
       - name: Verify glibc linkage
         run: |
